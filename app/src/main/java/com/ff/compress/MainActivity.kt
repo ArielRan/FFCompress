@@ -11,16 +11,25 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -58,6 +67,26 @@ private fun fmtRatio(src: Long, out: Long): String =
         if (saved > 0) "-${(saved * 100).toInt()}%" else "+${(-saved * 100).toInt()}%"
     }
 
+private fun fmtEta(sec: Long): String = "%d 分 %02d 秒".format(sec / 60, sec % 60)
+
+private fun presetLabel(p: String) = when (p) {
+    "veryfast" -> "极快"
+    "slow" -> "高压缩"
+    else -> "均衡"
+}
+
+/** 任务使用的主要压缩参数摘要 */
+private fun paramSummary(t: TaskEntity): String {
+    val eng = if (t.engine == Engine.SOFTWARE.name) "FFmpeg 软编" else "硬件编码"
+    val res = if (t.targetHeight == 0) "原分辨率" else "${t.targetHeight}P"
+    val br = if (t.targetBitrateMbps == 0f) "自动CRF" else "${t.targetBitrateMbps.toInt()}M"
+    return if (t.engine == Engine.SOFTWARE.name) {
+        "$eng · $res · $br · ${t.threadLimit}线程 · ${presetLabel(t.preset)}"
+    } else "$eng · $res · $br"
+}
+
+private enum class Page(val label: String) { TASKS("任务"), DONE("已完成") }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen() {
@@ -68,13 +97,24 @@ fun MainScreen() {
     val runtime by TaskRuntime.current.collectAsState()
     val res by CompressionBus.res.collectAsState()
 
+    var page by remember { mutableStateOf(Page.TASKS) }
     var editingTask by remember { mutableStateOf<TaskEntity?>(null) }
 
     val pending = tasks.filter { it.status == TaskStatus.PENDING }
     val runningTask = tasks.firstOrNull { it.status == TaskStatus.RUNNING }
+    val failed = tasks.filter { it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED }
     val doneList = tasks.filter { it.status == TaskStatus.DONE }
-    val otherList = tasks.filter { it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED }
     val totalSaved = doneList.sumOf { it.sourceSize - it.outputSize }
+    val isRunning = runtime != null && runningTask != null
+
+    // ---- 资源监控：软件在前台期间持续采样（不只在压缩时） ----
+    DisposableEffect(Unit) {
+        ResourceMonitor.start(context)
+        onDispose {
+            // 若后台压缩服务仍在跑，保留监控；否则停止采样省电
+            if (TaskRuntime.current.value == null) ResourceMonitor.stop()
+        }
+    }
 
     // ---- 权限 ----
     val notiLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -114,117 +154,69 @@ fun MainScreen() {
         }
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("FFCompress 视频压缩") }) }) { pad ->
-        LazyColumn(
-            Modifier.padding(pad).padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-                    Button(
-                        onClick = {
-                            pickVideos.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
-                            )
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (pending.isEmpty()) "选择视频" else "继续添加 (${pending.size})") }
-                    Button(
-                        onClick = { CompressionService.start(context) },
-                        enabled = pending.isNotEmpty() && runtime == null,
-                    ) { Text("开始压缩") }
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("FFCompress 视频压缩") }) },
+        bottomBar = {
+            NavigationBar {
+                listOf(Page.TASKS to pending.size + failed.size, Page.DONE to doneList.size).forEach { (p, n) ->
+                    NavigationBarItem(
+                        selected = page == p,
+                        onClick = { page = p },
+                        icon = { if (p == Page.TASKS) Icon(Icons.Filled.PlayArrow, null) else Icon(Icons.Filled.Check, null) },
+                        label = { Text(if (n > 0) "${p.label} ($n)" else p.label) },
+                    )
                 }
             }
+        },
+    ) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            // ===== 顶部固定：资源监控（可折叠，软件内常驻） =====
+            ResourceBar(res, compactRunning = isRunning)
 
-            // ---- 当前任务 ----
+            // ===== 顶部固定：运行中任务的实时进度条（任意页面可见） =====
             runningTask?.let { t ->
-                item {
-                    val rt = runtime
-                    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(t.displayName, fontWeight = FontWeight.Bold)
-                            LinearProgressIndicator(progress = { rt?.progress ?: 0f }, modifier = Modifier.fillMaxWidth())
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("${((rt?.progress ?: 0f) * 100).toInt()}%", fontSize = 13.sp)
-                                val eta = rt?.etaSec ?: -1
-                                Text(
-                                    if (eta < 0) "剩余时长估算中…" else "剩约 ${fmtEta(eta)}",
-                                    fontSize = 13.sp,
-                                )
-                                val ratio = rt?.estRatio ?: 0.7f
-                                Text("预计体积 ${fmtRatio(t.sourceSize, (t.sourceSize * ratio).toLong())}", fontSize = 13.sp)
-                            }
-                            OutlinedButton(onClick = { CompressionService.cancelCurrent(context) }) { Text("取消当前") }
-                        }
+                val rt = runtime
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                    LinearProgressIndicator(
+                        progress = { rt?.progress ?: 0f },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(
+                            "▸ ${t.displayName}  ${((rt?.progress ?: 0f) * 100).toInt()}%",
+                            fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        val eta = rt?.etaSec ?: -1
+                        Text(
+                            if (eta < 0) "估算中…" else "剩约 ${fmtEta(eta)}",
+                            fontSize = 12.sp, color = Color.Gray,
+                        )
                     }
                 }
             }
 
-            // ---- 待压缩队列 ----
-            if (pending.isNotEmpty()) {
-                item { Text("待压缩 (${pending.size})", fontWeight = FontWeight.Bold) }
-                items(pending, key = { it.id }) { t ->
-                    TaskCard(t) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = { editingTask = t }) { Text("参数") }
-                            TextButton(onClick = { scope.launch { dao.delete(t) } }) { Text("移除") }
-                        }
-                    }
-                }
-            }
-
-            // ---- 产出列表 ----
-            if (doneList.isNotEmpty()) {
-                item {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("产出 (${doneList.size})，共节省 ${fmtSize(totalSaved)}", fontWeight = FontWeight.Bold)
-                        TextButton(onClick = { scope.launch { dao.clearFinished() } }) { Text("清空") }
-                    }
-                }
-                items(doneList, key = { it.id }) { t ->
-                    TaskCard(t) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AssistChip(
-                                onClick = { share(context, t) },
-                                label = { Text("分享") },
-                            )
-                            AssistChip(
-                                onClick = { scope.launch { dao.delete(t) } },
-                                label = { Text("删除") },
-                            )
-                        }
-                    }
-                }
-            }
-
-            // ---- 失败/取消 ----
-            if (otherList.isNotEmpty()) {
-                item { Text("失败 / 已取消", fontWeight = FontWeight.Bold) }
-                items(otherList, key = { it.id }) { t ->
-                    TaskCard(t) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (t.status == TaskStatus.FAILED) {
-                                TextButton(onClick = { scope.launch { dao.reset(t.id) } }) { Text("重试") }
-                            }
-                            TextButton(onClick = { scope.launch { dao.delete(t) } }) { Text("移除") }
-                        }
-                    }
-                }
-            }
-
-            // ---- 资源监控 ----
-            item {
-                Text("实时资源监控", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("本机 CPU：${"%.1f".format(res.systemCpuPercent)} %")
-                        Text("压缩进程 CPU：${"%.1f".format(res.appCpuPercent)} %")
-                        Text("App 内存：${"%.0f".format(res.appMemMB)} MB")
-                        Text("系统可用内存：${"%.0f".format(res.availMemMB)} / ${"%.0f".format(res.totalMemMB)} MB")
-                        Text("磁盘写入：${"%.2f".format(res.ioWriteMBs)} MB/s")
-                    }
-                }
-                Spacer(Modifier.height(20.dp))
+            // ===== 页面内容 =====
+            when (page) {
+                Page.TASKS -> TasksPage(
+                    pending, failed, isRunning, runtime,
+                    onPick = {
+                        pickVideos.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+                        )
+                    },
+                    onStart = { CompressionService.start(context) },
+                    onCancel = { CompressionService.cancelCurrent(context) },
+                    onEdit = { editingTask = it },
+                    onRemove = { scope.launch { dao.delete(it) } },
+                    onRetry = { scope.launch { dao.reset(it.id) } },
+                )
+                Page.DONE -> DonePage(
+                    doneList, totalSaved,
+                    onShare = { share(context, it) },
+                    onDelete = { scope.launch { dao.delete(it) } },
+                    onClear = { scope.launch { dao.clearFinished() } },
+                )
             }
         }
     }
@@ -244,23 +236,184 @@ fun MainScreen() {
     }
 }
 
-private fun fmtEta(sec: Long): String = "%d 分 %02d 秒".format(sec / 60, sec % 60)
+// ================= 顶部固定资源监控条 =================
+
+@Composable
+private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val memUsedPct =
+        if (res.totalMemMB > 0) ((res.totalMemMB - res.availMemMB) / res.totalMemMB * 100).toInt() else 0
+    Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "CPU ${res.systemCpuPercent.toInt()}%  Mem $memUsedPct%" +
+                        if (compactRunning) "  压缩 ${res.appCpuPercent.toInt()}%" else "",
+                    fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                )
+                Spacer(Modifier.weight(1f))
+                Text("磁盘 ${"%.1f".format(res.ioWriteMBs)} MB/s", fontSize = 11.sp, color = Color.Gray)
+                Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = null, tint = Color.Gray,
+                    modifier = Modifier.padding(start = 4.dp).size(18.dp),
+                )
+            }
+            AnimatedVisibility(expanded) {
+                Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    HorizontalDivider()
+                    Text("本机 CPU：${"%.1f".format(res.systemCpuPercent)} %", fontSize = 12.sp)
+                    Text("压缩进程 CPU：${"%.1f".format(res.appCpuPercent)} %", fontSize = 12.sp)
+                    Text("App 内存：${"%.0f".format(res.appMemMB)} MB", fontSize = 12.sp)
+                    Text("系统内存：已用 $memUsedPct%（可用 ${"%.0f".format(res.availMemMB)} / ${"%.0f".format(res.totalMemMB)} MB）", fontSize = 12.sp)
+                    Text("磁盘写入：${"%.2f".format(res.ioWriteMBs)} MB/s", fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+// ================= Tab 1：任务列表 =================
+
+@Composable
+private fun TasksPage(
+    pending: List<TaskEntity>,
+    failed: List<TaskEntity>,
+    isRunning: Boolean,
+    runtime: RuntimeInfo?,
+    onPick: () -> Unit,
+    onStart: () -> Unit,
+    onCancel: () -> Unit,
+    onEdit: (TaskEntity) -> Unit,
+    onRemove: (TaskEntity) -> Unit,
+    onRetry: (TaskEntity) -> Unit,
+) {
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(vertical = 10.dp),
+    ) {
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onPick, modifier = Modifier.weight(1f)) {
+                    Text(if (pending.isEmpty()) "选择视频" else "继续添加 (${pending.size})")
+                }
+                Button(onClick = onStart, enabled = pending.isNotEmpty() && !isRunning) {
+                    Text(if (isRunning) "压缩中…" else "开始压缩")
+                }
+            }
+        }
+
+        if (pending.isEmpty() && failed.isEmpty()) {
+            item {
+                Text(
+                    if (isRunning) "任务压缩中，进度见顶部进度条" else "暂无任务，点上方「选择视频」批量添加",
+                    color = Color.Gray, fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 24.dp),
+                )
+            }
+        }
+
+        items(pending, key = { it.id }) { t ->
+            TaskCard(t) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { onEdit(t) }) { Text("参数") }
+                    TextButton(onClick = { onRemove(t) }) { Text("移除") }
+                }
+            }
+        }
+
+        if (failed.isNotEmpty()) {
+            item { Text("失败 / 已取消", fontWeight = FontWeight.Bold, fontSize = 14.sp) }
+            items(failed, key = { it.id }) { t ->
+                TaskCard(t) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (t.status == TaskStatus.FAILED) {
+                            TextButton(onClick = { onRetry(t) }) { Text("重试") }
+                        }
+                        TextButton(onClick = { onRemove(t) }) { Text("移除") }
+                    }
+                }
+            }
+        }
+
+        if (isRunning) {
+            item {
+                OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("取消当前任务") }
+            }
+        }
+    }
+}
+
+// ================= Tab 2：已完成列表 =================
+
+@Composable
+private fun DonePage(
+    doneList: List<TaskEntity>,
+    totalSaved: Long,
+    onShare: (TaskEntity) -> Unit,
+    onDelete: (TaskEntity) -> Unit,
+    onClear: () -> Unit,
+) {
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(vertical = 10.dp),
+    ) {
+        if (doneList.isEmpty()) {
+            item {
+                Text(
+                    "还没有已完成的压缩任务",
+                    color = Color.Gray, fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 24.dp),
+                )
+            }
+        } else {
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("共 ${doneList.size} 个 · 节省 ${fmtSize(totalSaved)}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    TextButton(onClick = onClear) { Text("清空记录") }
+                }
+            }
+            items(doneList, key = { it.id }) { t ->
+                TaskCard(t) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(onClick = { onShare(t) }, label = { Text("分享") })
+                        AssistChip(onClick = { onDelete(t) }, label = { Text("删除") })
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ================= 任务卡片（含源大小 + 参数摘要） =================
 
 @Composable
 private fun TaskCard(t: TaskEntity, actions: @Composable () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(t.displayName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1)
+                Text(t.displayName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (t.status == TaskStatus.DONE && t.sourceSize > 0) {
                     Text(fmtRatio(t.sourceSize, t.outputSize), color = Color(0xFF1E7B34), fontWeight = FontWeight.Bold)
                 }
             }
+            // 源视频信息
             Text(
-                "${fmtSize(t.sourceSize)} · ${t.width}×${t.height} · ${fmtDuration(t.durationMs)} · " +
+                "源：${fmtSize(t.sourceSize)} · ${t.width}×${t.height} · ${fmtDuration(t.durationMs)} · " +
                     "${"%.1f".format(t.sourceBitrate / 1e6)} Mbps",
                 fontSize = 12.sp, color = Color.Gray,
             )
+            // 主要压缩参数
+            Text("参数：${paramSummary(t)}", fontSize = 12.sp, color = Color(0xFF3D5A80))
+            // 产出信息
+            if (t.status == TaskStatus.DONE) {
+                Text("产出：${fmtSize(t.outputSize)}（${fmtSize(t.sourceSize)} → ${fmtSize(t.outputSize)}）", fontSize = 12.sp)
+            }
             t.error?.let { Text("错误：$it", color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
         }
