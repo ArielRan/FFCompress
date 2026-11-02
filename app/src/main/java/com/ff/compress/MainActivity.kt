@@ -134,19 +134,29 @@ fun MainScreen() {
         ActivityResultContracts.PickMultipleVisualMedia(30)
     ) { uris ->
         if (uris.isNotEmpty()) scope.launch {
+            var skipCount = 0
+            var skipName = ""
             uris.forEach { uri ->
                 val meta = MetadataReader.read(context, uri)
                 val name = queryName(context, uri) ?: "视频"
+                val size = querySize(context, uri)
                 val rec = meta?.let { Recommender.recommend(it) }
+                // 码率缺失时用「体积/时长」推算，避免推荐引擎拿到 0 后凭空猜参数
+                val srcBps = when {
+                    meta == null -> 0L
+                    meta.bitrateBps > 0 -> meta.bitrateBps
+                    size > 0 && meta.durationMs > 0 -> size * 8000 / meta.durationMs
+                    else -> 0L
+                }
                 dao.insert(
                     TaskEntity(
                         uri = uri.toString(),
                         displayName = name,
-                        sourceSize = querySize(context, uri),
+                        sourceSize = size,
                         durationMs = meta?.durationMs ?: 0,
                         width = meta?.width ?: 0,
                         height = meta?.height ?: 0,
-                        sourceBitrate = meta?.bitrateBps ?: 0,
+                        sourceBitrate = srcBps,
                         engine = (rec?.engine ?: Engine.HARDWARE).name,
                         targetHeight = rec?.targetHeight ?: 0,
                         targetBitrateMbps = rec?.targetBitrateMbps ?: 0f,
@@ -154,6 +164,18 @@ fun MainScreen() {
                         preset = rec?.preset ?: "medium",
                     )
                 )
+                if (rec?.skip == true) {
+                    skipCount++
+                    if (skipName.isEmpty()) skipName = name
+                }
+            }
+            if (skipCount > 0) {
+                android.widget.Toast.makeText(
+                    context,
+                    "已添加 ${uris.size} 个视频；其中 $skipCount 个（如 $skipName）码率已经很低，" +
+                        "再压体积只会小一点点、画质却会下降，可在参数里看到详细说明",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }
@@ -512,20 +534,42 @@ private fun TaskCard(t: TaskEntity, onClick: (() -> Unit)? = null, actions: @Com
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(t.displayName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (t.status == TaskStatus.DONE && t.sourceSize > 0) {
-                    Text(fmtRatio(t.sourceSize, t.outputSize), color = Color(0xFF1E7B34), fontWeight = FontWeight.Bold)
+                    val savedRatio = 1 - t.outputSize.toDouble() / t.sourceSize
+                    Text(
+                        fmtRatio(t.sourceSize, t.outputSize),
+                        color = if (savedRatio < 0.05) Color(0xFFB26A00) else Color(0xFF1E7B34),
+                        fontWeight = FontWeight.Bold,
+                    )
                 }
             }
             // 源视频信息
             Text(
                 "源：${fmtSize(t.sourceSize)} · ${t.width}×${t.height} · ${fmtDuration(t.durationMs)} · " +
-                    "${"%.1f".format(t.sourceBitrate / 1e6)} Mbps",
+                    "${"%.2f".format(t.sourceBitrate / 1e6)} Mbps",
                 fontSize = 12.sp, color = Color.Gray,
             )
             // 主要压缩参数
             Text("参数：${paramSummary(t)}", fontSize = 12.sp, color = Color(0xFF3D5A80))
+            // 收益提示：源码率已很低时提前说清楚，避免"压完没变化"的困惑
+            if (t.status == TaskStatus.PENDING) {
+                val est = Recommender.estimateRatio(t)
+                if (est > 0.9f) {
+                    Text(
+                        "提示：该视频码率已接近 ${t.height}P 的画质下限，预计只能缩小 " +
+                            "${((1 - est) * 100).toInt().coerceAtLeast(1)}%，画质会下降，建议跳过",
+                        fontSize = 11.sp, color = Color(0xFFB26A00),
+                    )
+                }
+            }
             // 产出信息
             if (t.status == TaskStatus.DONE) {
                 Text("产出：${fmtSize(t.outputSize)}（${fmtSize(t.sourceSize)} → ${fmtSize(t.outputSize)}）", fontSize = 12.sp)
+                if (t.sourceSize > 0 && t.outputSize.toDouble() / t.sourceSize > 0.95) {
+                    Text(
+                        "几乎无变化：源视频已经是低码率编码，重新编码省不下体积",
+                        fontSize = 11.sp, color = Color(0xFFB26A00),
+                    )
+                }
             }
             t.error?.let { Text("错误：$it", color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
@@ -543,7 +587,13 @@ private fun ParamEditDialog(task: TaskEntity, onDismiss: () -> Unit, onSave: (Ta
 
     // 推荐解释：始终按源视频信息重新计算，让用户知道"系统为什么这么推荐"
     val explanation = remember(task.id) {
-        val meta = MetadataReader.VideoMeta(task.durationMs, task.width, task.height, task.sourceBitrate)
+        val meta = MetadataReader.VideoMeta(
+            durationMs = task.durationMs,
+            width = task.width,
+            height = task.height,
+            bitrateBps = task.sourceBitrate,
+            sizeBytes = task.sourceSize,
+        )
         if (task.durationMs > 0) Recommender.recommend(meta).explanation
         else "无法读取该视频信息（可能是不支持的格式），请手动设置参数。"
     }

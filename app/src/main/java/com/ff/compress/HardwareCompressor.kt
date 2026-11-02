@@ -54,6 +54,15 @@ class HardwareCompressor : CompressionEngine {
     ) {
         lastError = null
         finished = false
+        // 硬编在未指定码率时默认值往往高于源（尤其低码率视频），这里按源码率的 75% 兜底
+        val srcVideoBps = try {
+            MetadataReader.read(ctx, input)?.effectiveVideoBitrateBps ?: 0L
+        } catch (e: Exception) { 0L }
+        val bitrateMbps = when {
+            opts.targetBitrateMbps > 0f -> opts.targetBitrateMbps
+            srcVideoBps > 0 -> (srcVideoBps * 0.75 / 1_000_000.0).coerceIn(0.3, 12.0).toFloat()
+            else -> 0f
+        }
         kotlinx.coroutines.suspendCancellableCoroutine { cont ->
         cancelled = false
         mainHandler.post {
@@ -69,9 +78,9 @@ class HardwareCompressor : CompressionEngine {
                     .setVideoMimeType(MimeTypes.VIDEO_H264)
                     .setAudioMimeType(MimeTypes.AUDIO_AAC)
 
-                if (opts.targetBitrateMbps > 0f) {
+                if (bitrateMbps > 0f) {
                     val settings = VideoEncoderSettings.Builder()
-                        .setBitrate((opts.targetBitrateMbps * 1_000_000).toInt())
+                        .setBitrate((bitrateMbps * 1_000_000).toInt())
                         .build()
                     builder.setEncoderFactory(
                         DefaultEncoderFactory.Builder(ctx)

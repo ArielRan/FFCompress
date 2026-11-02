@@ -117,16 +117,31 @@ class CompressionService : Service() {
                 }
                 out.exists() && out.length() > 0 -> {
                     val size = out.length()
-                    val saved = withContext(Dispatchers.IO) {
-                        OutputStore.save(this@CompressionService, out, OutputStore.buildFileName())
-                    }
-                    dao.update(
-                        t.copy(
-                            status = TaskStatus.DONE, progress = 1f,
-                            outputPath = saved.path, outputUri = saved.uri,
-                            outputSize = size, finishedAt = now,
+                    if (t.sourceSize > 0 && size >= t.sourceSize) {
+                        // 压完反而更大：源视频码率已经很低，重编码只有损失没有收益，直接丢弃产出
+                        out.delete()
+                        val hint = if (t.engine == Engine.HARDWARE.name)
+                            "硬件编码器未按目标码率输出（部分机型不支持精确控码），建议改用 FFmpeg 软编"
+                        else "该视频码率已经很低，重新编码省不下体积"
+                        dao.update(
+                            t.copy(
+                                status = TaskStatus.FAILED, progress = 1f,
+                                error = "压缩后体积没有变小（$hint），已丢弃本次产出，建议保留原视频",
+                                finishedAt = now,
+                            )
                         )
-                    )
+                    } else {
+                        val saved = withContext(Dispatchers.IO) {
+                            OutputStore.save(this@CompressionService, out, OutputStore.buildFileName())
+                        }
+                        dao.update(
+                            t.copy(
+                                status = TaskStatus.DONE, progress = 1f,
+                                outputPath = saved.path, outputUri = saved.uri,
+                                outputSize = size, finishedAt = now,
+                            )
+                        )
+                    }
                 }
                 else -> {
                     out.delete()
