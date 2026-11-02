@@ -9,6 +9,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,33 +17,34 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** 前台压缩服务：通知栏进度、可取消、资源监控 */
+/**
+ * 串行压缩队列服务：
+ * - 从 Room 取下一条 PENDING 任务执行，直到队列清空
+ * - 当前任务可取消（标记 CANCELLED 后继续下一条）
+ * - 实时进度/ETA/预估比例通过 TaskRuntime 推给 UI，进度节流写库
+ */
 class CompressionService : Service() {
 
-    private var job: Job? = null
+    private var queueJob: Job? = null
     private var engine: CompressionEngine? = null
+    @Volatile private var cancelCurrent = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        startForeground(NOTI_ID, buildNotification("准备中…", 0))
+        startForeground(NOTI_ID, buildNotification("压缩队列待命", null, 0))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CANCEL -> {
+            ACTION_START -> if (queueJob == null) runQueue()
+            ACTION_CANCEL_CURRENT -> {
+                cancelCurrent = true
                 engine?.cancel()
-                return START_NOT_STICKY
-            }
-            ACTION_START -> {
-                val uri = intent.getParcelableExtra<Uri>(EXTRA_URI)
-                val opts = intent.getSerializableExtra(EXTRA_OPTS) as? CompressOptions ?: CompressOptions()
-                if (uri != null && job == null) runJob(uri, opts)
             }
             ACTION_STOP_UI -> {
-                // 任务已完成/失败后由 UI 触发，停止前台
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -50,43 +52,82 @@ class CompressionService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun runJob(uri: Uri, opts: CompressOptions) {
-        CompressionBus.updateState { CompressionState(running = true, stage = "准备中…") }
-        ResourceMonitor.start(this)
-        engine = if (opts.engine == Engine.HARDWARE) HardwareCompressor() else SoftwareCompressor()
-
-        job = CompressionBus.scope.launch(Dispatchers.Default) {
-            try {
-                val outDir = getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: filesDir
-                val name = "FFCompress_${System.currentTimeMillis()}.mp4"
-                val out = File(outDir, name)
-
-                CompressionBus.updateState { it.copy(stage = "压缩中…") }
-                engine!!.compress(
-                    this@CompressionService, uri, out, opts
-                ) { p ->
-                    CompressionBus.updateState { it.copy(progress = p) }
-                    notify(buildNotification("压缩中… ${(p * 100).toInt()}%", (p * 100).toInt()))
-                }
-
-                if (out.exists() && out.length() > 0) {
-                    CompressionBus.updateState {
-                        it.copy(running = false, progress = 1f, stage = "完成", outputPath = out.absolutePath)
-                    }
-                } else {
-                    CompressionBus.updateState {
-                        it.copy(running = false, stage = "失败", error = "引擎未产出有效文件")
-                    }
-                }
-            } catch (e: Exception) {
-                CompressionBus.updateState {
-                    it.copy(running = false, stage = "失败", error = e.message ?: e.javaClass.simpleName)
-                }
-            } finally {
-                ResourceMonitor.stop()
-                notify(buildNotification("任务结束", 100, silent = true))
-                job = null
+    private fun runQueue() {
+        queueJob = CompressionBus.scope.launch(Dispatchers.Default) {
+            val dao = AppDatabase.get(this@CompressionService).taskDao()
+            var done = 0
+            while (true) {
+                val t = dao.nextPending() ?: break
+                runSingle(dao, t)
+                done++
             }
+            if (done > 0) {
+                notify(buildNotification("队列完成：本次压缩了 $done 个视频", null, 100))
+            }
+            TaskRuntime.clear()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            queueJob = null
+        }
+    }
+
+    private suspend fun runSingle(dao: TaskDao, t: TaskEntity) {
+        val startedAt = SystemClock.elapsedRealtime()
+        val estRatio = Recommender.estimateRatio(t)
+        dao.update(t.copy(status = TaskStatus.RUNNING, progress = 0f))
+        TaskRuntime.update(RuntimeInfo(t.id, "压缩中…", 0f, -1, estRatio))
+        ResourceMonitor.start(this)
+        cancelCurrent = false
+
+        val outDir = getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: filesDir
+        val out = File(outDir, "FFCompress_${System.currentTimeMillis()}.mp4")
+        var lastDb = 0L
+
+        try {
+            engine = if (t.engine == Engine.SOFTWARE.name) SoftwareCompressor() else HardwareCompressor()
+            engine!!.compress(
+                this,
+                Uri.parse(t.uri),
+                out,
+                t.options(),
+            ) { p ->
+                val elapsed = SystemClock.elapsedRealtime() - startedAt
+                val eta = if (p >= 0.05f) {
+                    (((elapsed / p) * (1 - p)) / 1000).toLong().coerceAtLeast(0)
+                } else -1
+                TaskRuntime.update(RuntimeInfo(t.id, "压缩中…", p, eta, estRatio))
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastDb > 1000) {
+                    lastDb = now
+                    // 原子条件更新：只有仍处于 RUNNING 的行才会被写进度
+                    CompressionBus.scope.launch { dao.updateProgress(t.id, p) }
+                }
+                notify(buildNotification("${t.displayName} ${(p * 100).toInt()}%", t.displayName, (p * 100).toInt()))
+            }
+
+            val now = System.currentTimeMillis()
+            when {
+                cancelCurrent -> dao.update(
+                    t.copy(status = TaskStatus.CANCELLED, progress = 0f, finishedAt = now)
+                )
+                out.exists() && out.length() > 0 -> dao.update(
+                    t.copy(
+                        status = TaskStatus.DONE, progress = 1f,
+                        outputPath = out.absolutePath, outputSize = out.length(), finishedAt = now,
+                    )
+                )
+                else -> dao.update(
+                    t.copy(status = TaskStatus.FAILED, error = "引擎未产出有效文件", finishedAt = now)
+                )
+            }
+        } catch (e: Exception) {
+            dao.update(
+                t.copy(status = TaskStatus.FAILED, error = e.message ?: e.javaClass.simpleName, finishedAt = System.currentTimeMillis())
+            )
+        } finally {
+            engine = null
+            ResourceMonitor.stop()
+            TaskRuntime.clear()
         }
     }
 
@@ -107,16 +148,14 @@ class CompressionService : Service() {
         }
     }
 
-    private fun buildNotification(text: String, progress: Int, silent: Boolean = false): Notification {
+    private fun buildNotification(text: String, taskName: String?, progress: Int): Notification {
         val b = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_manage)
-            .setContentTitle("FFCompress")
+            .setContentTitle(if (taskName != null) "FFCompress：$taskName" else "FFCompress")
             .setContentText(text)
             .setOnlyAlertOnce(true)
-            .setOngoing(!silent)
-        if (progress in 1..99) {
-            b.setProgress(100, progress, false)
-        }
+            .setOngoing(taskName != null && progress in 1..99)
+        if (progress in 1..99) b.setProgress(100, progress, false)
         return b.build()
     }
 
@@ -129,21 +168,15 @@ class CompressionService : Service() {
         private const val CHANNEL_ID = "compress"
         private const val NOTI_ID = 1
         const val ACTION_START = "com.ff.compress.START"
-        const val ACTION_CANCEL = "com.ff.compress.CANCEL"
+        const val ACTION_CANCEL_CURRENT = "com.ff.compress.CANCEL_CURRENT"
         const val ACTION_STOP_UI = "com.ff.compress.STOP_UI"
-        const val EXTRA_URI = "uri"
-        const val EXTRA_OPTS = "opts"
 
-        fun start(ctx: Context, uri: Uri, opts: CompressOptions) {
-            val i = Intent(ctx, CompressionService::class.java)
-                .setAction(ACTION_START)
-                .putExtra(EXTRA_URI, uri)
-                .putExtra(EXTRA_OPTS, opts)
-            ctx.startForegroundService(i)
+        fun start(ctx: Context) {
+            ctx.startForegroundService(Intent(ctx, CompressionService::class.java).setAction(ACTION_START))
         }
 
-        fun cancel(ctx: Context) {
-            ctx.startService(Intent(ctx, CompressionService::class.java).setAction(ACTION_CANCEL))
+        fun cancelCurrent(ctx: Context) {
+            ctx.startService(Intent(ctx, CompressionService::class.java).setAction(ACTION_CANCEL_CURRENT))
         }
     }
 }

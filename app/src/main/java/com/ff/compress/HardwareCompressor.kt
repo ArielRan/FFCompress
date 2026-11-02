@@ -37,6 +37,7 @@ class HardwareCompressor : CompressionEngine {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var transformer: Transformer? = null
     private var cancelled = false
+    @Volatile private var lastError: String? = null
 
     override fun cancel() {
         cancelled = true
@@ -49,7 +50,9 @@ class HardwareCompressor : CompressionEngine {
         output: File,
         opts: CompressOptions,
         onProgress: (Float) -> Unit,
-    ) = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+    ) {
+        lastError = null
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
         cancelled = false
         mainHandler.post {
             try {
@@ -81,7 +84,8 @@ class HardwareCompressor : CompressionEngine {
                             if (!cancelled) cont.resume(Unit)
                         }
                         override fun onError(composition: androidx.media3.transformer.Composition, result: ExportResult, exportException: ExportException) {
-                            if (!cancelled) cont.resume(Unit) // 错误信息由上层校验 result 处理
+                            lastError = exportException.message ?: "未知编码错误"
+                            if (!cancelled) cont.resume(Unit)
                         }
                     })
                     .build()
@@ -109,8 +113,13 @@ class HardwareCompressor : CompressionEngine {
                     }
                 })
             } catch (e: Exception) {
-                if (!cancelled) cont.resume(Unit)
+                if (!cancelled) {
+                    lastError = e.message ?: e.javaClass.simpleName
+                    cont.resume(Unit)
+                }
             }
         }
+        }
+        lastError?.let { throw IllegalStateException("硬件编码失败：$it") }
     }
 }

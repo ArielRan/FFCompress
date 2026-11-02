@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -55,4 +56,9 @@ dependencies {
     implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full-gpl:8.1.7")
     // fork 的 POM 未声明此传递依赖，需显式引入
     implementation("com.arthenica:smart-exception-java:0.2.0")
+
+    // Room 任务持久化
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
 }
