@@ -173,33 +173,10 @@ fun MainScreen() {
             // ===== 顶部固定：资源监控（可折叠，软件内常驻） =====
             ResourceBar(res, compactRunning = isRunning)
 
-            // ===== 顶部固定：运行中任务的实时进度条（任意页面可见） =====
-            runningTask?.let { t ->
-                val rt = runtime
-                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-                    LinearProgressIndicator(
-                        progress = { rt?.progress ?: 0f },
-                        modifier = Modifier.fillMaxWidth().height(6.dp),
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(
-                            "▸ ${t.displayName}  ${((rt?.progress ?: 0f) * 100).toInt()}%",
-                            fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        val eta = rt?.etaSec ?: -1
-                        Text(
-                            if (eta < 0) "估算中…" else "剩约 ${fmtEta(eta)}",
-                            fontSize = 12.sp, color = Color.Gray,
-                        )
-                    }
-                }
-            }
-
             // ===== 页面内容 =====
             when (page) {
                 Page.TASKS -> TasksPage(
-                    pending, failed, isRunning, runtime,
+                    pending, failed, runningTask, runtime,
                     onPick = {
                         pickVideos.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
@@ -213,6 +190,7 @@ fun MainScreen() {
                 )
                 Page.DONE -> DonePage(
                     doneList, totalSaved,
+                    onPlay = { play(context, it) },
                     onShare = { share(context, it) },
                     onDelete = { scope.launch { dao.delete(it) } },
                     onClear = { scope.launch { dao.clearFinished() } },
@@ -282,7 +260,7 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
 private fun TasksPage(
     pending: List<TaskEntity>,
     failed: List<TaskEntity>,
-    isRunning: Boolean,
+    runningTask: TaskEntity?,
     runtime: RuntimeInfo?,
     onPick: () -> Unit,
     onStart: () -> Unit,
@@ -301,27 +279,62 @@ private fun TasksPage(
                 Button(onClick = onPick, modifier = Modifier.weight(1f)) {
                     Text(if (pending.isEmpty()) "选择视频" else "继续添加 (${pending.size})")
                 }
-                Button(onClick = onStart, enabled = pending.isNotEmpty() && !isRunning) {
-                    Text(if (isRunning) "压缩中…" else "开始压缩")
+                Button(onClick = onStart, enabled = pending.isNotEmpty() && runningTask == null) {
+                    Text(if (runningTask != null) "压缩中…" else "开始压缩")
                 }
             }
         }
 
-        if (pending.isEmpty() && failed.isEmpty()) {
+        if (pending.isEmpty() && failed.isEmpty() && runningTask == null) {
             item {
                 Text(
-                    if (isRunning) "任务压缩中，进度见顶部进度条" else "暂无任务，点上方「选择视频」批量添加",
+                    "暂无任务，点上方「选择视频」批量添加",
                     color = Color.Gray, fontSize = 13.sp,
                     modifier = Modifier.padding(vertical = 24.dp),
                 )
             }
         }
 
-        items(pending, key = { it.id }) { t ->
-            TaskCard(t) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { onEdit(t) }) { Text("参数") }
-                    TextButton(onClick = { onRemove(t) }) { Text("移除") }
+        // ---- 运行中任务：独立进度条 ----
+        runningTask?.let { t ->
+            val rt = runtime
+            item(key = "running") {
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(t.displayName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("压缩中", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        }
+                        LinearProgressIndicator(
+                            progress = { rt?.progress ?: 0f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("${((rt?.progress ?: 0f) * 100).toInt()}%", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            val eta = rt?.etaSec ?: -1
+                            Text(
+                                if (eta < 0) "剩余时长估算中…" else "剩约 ${fmtEta(eta)}",
+                                fontSize = 12.sp, color = Color.Gray,
+                            )
+                            val ratio = rt?.estRatio ?: 0.7f
+                            Text("预计体积 ${fmtRatio(t.sourceSize, (t.sourceSize * ratio).toLong())}", fontSize = 12.sp, color = Color.Gray)
+                        }
+                        Text("参数：${paramSummary(t)}", fontSize = 12.sp, color = Color(0xFF3D5A80))
+                        OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("取消当前任务") }
+                    }
+                }
+            }
+        }
+
+        // ---- 排队中 ----
+        if (pending.isNotEmpty()) {
+            item { Text("排队中 (${pending.size})", fontWeight = FontWeight.Bold, fontSize = 14.sp) }
+            items(pending, key = { it.id }) { t ->
+                TaskCard(t) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { onEdit(t) }) { Text("参数") }
+                        TextButton(onClick = { onRemove(t) }) { Text("移除") }
+                    }
                 }
             }
         }
@@ -339,12 +352,6 @@ private fun TasksPage(
                 }
             }
         }
-
-        if (isRunning) {
-            item {
-                OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("取消当前任务") }
-            }
-        }
     }
 }
 
@@ -354,6 +361,7 @@ private fun TasksPage(
 private fun DonePage(
     doneList: List<TaskEntity>,
     totalSaved: Long,
+    onPlay: (TaskEntity) -> Unit,
     onShare: (TaskEntity) -> Unit,
     onDelete: (TaskEntity) -> Unit,
     onClear: () -> Unit,
@@ -374,13 +382,14 @@ private fun DonePage(
         } else {
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("共 ${doneList.size} 个 · 节省 ${fmtSize(totalSaved)}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text("共 ${doneList.size} 个 · 节省 ${fmtSize(totalSaved)} · 点卡片播放", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     TextButton(onClick = onClear) { Text("清空记录") }
                 }
             }
             items(doneList, key = { it.id }) { t ->
-                TaskCard(t) {
+                TaskCard(t, onClick = { onPlay(t) }) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(onClick = { onPlay(t) }, label = { Text("▶ 播放") })
                         AssistChip(onClick = { onShare(t) }, label = { Text("分享") })
                         AssistChip(onClick = { onDelete(t) }, label = { Text("删除") })
                     }
@@ -393,8 +402,10 @@ private fun DonePage(
 // ================= 任务卡片（含源大小 + 参数摘要） =================
 
 @Composable
-private fun TaskCard(t: TaskEntity, actions: @Composable () -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
+private fun TaskCard(t: TaskEntity, onClick: (() -> Unit)? = null, actions: @Composable () -> Unit) {
+    Card(
+        Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable { onClick() } else Modifier),
+    ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(t.displayName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -493,6 +504,22 @@ private fun ParamEditDialog(task: TaskEntity, onDismiss: () -> Unit, onSave: (Ta
         },
         dismissButton = { OutlinedButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+private fun play(context: android.content.Context, t: TaskEntity) {
+    val path = t.outputPath ?: return
+    val file = File(path)
+    if (!file.exists()) return
+    val uri = FileProvider.getUriForFile(context, "com.ff.compress.fileprovider", file)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "video/mp4")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    try {
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "未找到可播放的视频应用", android.widget.Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun share(context: android.content.Context, t: TaskEntity) {
