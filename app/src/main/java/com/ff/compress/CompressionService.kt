@@ -82,6 +82,7 @@ class CompressionService : Service() {
         val outDir = getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: filesDir
         val out = File(outDir, "FFCompress_${System.currentTimeMillis()}.mp4")
         var lastDb = 0L
+        var maxProgress = 0f // 进度只进不退，防止任何引擎回调回跳导致进度条闪烁
 
         try {
             engine = if (t.engine == Engine.SOFTWARE.name) SoftwareCompressor() else HardwareCompressor()
@@ -90,7 +91,8 @@ class CompressionService : Service() {
                 Uri.parse(t.uri),
                 out,
                 t.options(),
-            ) { p ->
+            ) { rawP ->
+                val p = if (rawP > maxProgress) rawP.also { maxProgress = it } else maxProgress
                 val elapsed = SystemClock.elapsedRealtime() - startedAt
                 val eta = if (p >= 0.05f) {
                     (((elapsed / p) * (1 - p)) / 1000).toLong().coerceAtLeast(0)

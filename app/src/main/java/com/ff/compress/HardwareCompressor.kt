@@ -37,6 +37,7 @@ class HardwareCompressor : CompressionEngine {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var transformer: Transformer? = null
     private var cancelled = false
+    @Volatile private var finished = false
     @Volatile private var lastError: String? = null
 
     override fun cancel() {
@@ -52,6 +53,7 @@ class HardwareCompressor : CompressionEngine {
         onProgress: (Float) -> Unit,
     ) {
         lastError = null
+        finished = false
         kotlinx.coroutines.suspendCancellableCoroutine { cont ->
         cancelled = false
         mainHandler.post {
@@ -81,9 +83,12 @@ class HardwareCompressor : CompressionEngine {
                 val t = builder
                     .addListener(object : Transformer.Listener {
                         override fun onCompleted(composition: androidx.media3.transformer.Composition, result: ExportResult) {
+                            finished = true
+                            onProgress(1f)
                             if (!cancelled) cont.resume(Unit)
                         }
                         override fun onError(composition: androidx.media3.transformer.Composition, result: ExportResult, exportException: ExportException) {
+                            finished = true
                             lastError = exportException.message ?: "未知编码错误"
                             if (!cancelled) cont.resume(Unit)
                         }
@@ -96,20 +101,21 @@ class HardwareCompressor : CompressionEngine {
                     .build()
                 t.start(mediaItem, output.absolutePath)
 
-                // 轮询进度
+                // 轮询进度：只在 AVAILABLE 状态上报，且进度只进不退（防回跳闪烁）
                 val holder = androidx.media3.transformer.ProgressHolder()
+                var lastP = 0f
                 mainHandler.post(object : Runnable {
                     override fun run() {
-                        if (cancelled) return
+                        if (cancelled || finished) return
                         val state = t.getProgress(holder)
-                        onProgress(holder.progress / 100f)
-                        if (state == Transformer.PROGRESS_STATE_AVAILABLE && holder.progress < 100) {
-                            mainHandler.postDelayed(this, 200)
-                        } else if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
-                            onProgress(1f)
-                        } else {
-                            mainHandler.postDelayed(this, 200)
+                        if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                            val p = holder.progress / 100f
+                            if (p > lastP) {
+                                lastP = p
+                                onProgress(p)
+                            }
                         }
+                        mainHandler.postDelayed(this, 200)
                     }
                 })
             } catch (e: Exception) {

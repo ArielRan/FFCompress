@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -299,6 +301,11 @@ private fun TasksPage(
         runningTask?.let { t ->
             val rt = runtime
             item(key = "running") {
+                val animProgress by animateFloatAsState(
+                    targetValue = rt?.progress ?: 0f,
+                    animationSpec = tween(durationMillis = 300),
+                    label = "taskProgress",
+                )
                 Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -306,7 +313,7 @@ private fun TasksPage(
                             Text("压缩中", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                         }
                         LinearProgressIndicator(
-                            progress = { rt?.progress ?: 0f },
+                            progress = { animProgress },
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
