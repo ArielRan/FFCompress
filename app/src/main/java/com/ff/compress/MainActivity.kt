@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -101,6 +102,7 @@ fun MainScreen() {
 
     var page by remember { mutableStateOf(Page.TASKS) }
     var editingTask by remember { mutableStateOf<TaskEntity?>(null) }
+    var showSettings by remember { mutableStateOf(false) }
 
     val pending = tasks.filter { it.status == TaskStatus.PENDING }
     val runningTask = tasks.firstOrNull { it.status == TaskStatus.RUNNING }
@@ -157,7 +159,16 @@ fun MainScreen() {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("FFCompress 视频压缩") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("FFCompress 视频压缩") },
+                actions = {
+                    IconButton(onClick = { showSettings = true }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "设置")
+                    }
+                },
+            )
+        },
         bottomBar = {
             NavigationBar {
                 listOf(Page.TASKS to pending.size + failed.size, Page.DONE to doneList.size).forEach { (p, n) ->
@@ -214,6 +225,84 @@ fun MainScreen() {
             },
         )
     }
+
+    // ---- 设置（全局存储位置） ----
+    if (showSettings) {
+        StorageSettingsDialog(onDismiss = { showSettings = false })
+    }
+}
+
+// ================= 设置：全局存储位置 =================
+
+@Composable
+private fun StorageSettingsDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var mode by remember { mutableStateOf(StoragePrefs.mode(context)) }
+    var subfolder by remember { mutableStateOf(StoragePrefs.subfolder(context)) }
+    var treeUri by remember { mutableStateOf(StoragePrefs.treeUri(context)) }
+    val currentDesc = when (mode) {
+        StorageMode.MEDIA -> "内部存储/Movies/${subfolder.ifBlank { "FFCompress" }}（相册可见）"
+        StorageMode.PRIVATE -> "Android/data/com.ff.compress/files/Movies（仅本 App，卸载会删除）"
+        StorageMode.TREE -> {
+            val name = treeUri?.let {
+                runCatching {
+                    androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(it))?.name
+                }.getOrNull()
+            }
+            if (treeUri == null) "尚未选择文件夹" else "自定义文件夹：${name ?: treeUri}"
+        }
+    }
+
+    val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            OutputStore.takePersistable(context, uri)
+            treeUri = uri.toString()
+            mode = StorageMode.TREE
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("设置", fontSize = 18.sp) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("压缩后的视频保存到", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                StorageMode.entries.forEach { m ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = mode == m, onClick = { mode = m })
+                        Text(m.label, fontSize = 14.sp)
+                    }
+                }
+                if (mode == StorageMode.MEDIA) {
+                    OutlinedTextField(
+                        value = subfolder,
+                        onValueChange = { subfolder = it },
+                        label = { Text("子文件夹名（Movies/ 下）", fontSize = 12.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (mode == StorageMode.TREE) {
+                    OutlinedButton(onClick = { treePicker.launch(null) }) { Text("选择文件夹…") }
+                }
+                HorizontalDivider()
+                Text("当前位置：$currentDesc", fontSize = 12.sp, color = Color(0xFF3D5A80))
+                Text(
+                    "说明：公共视频目录和自定义文件夹的文件在系统相册/文件管理器里可见，卸载 App 不会删除；私有目录随 App 卸载一起清除。",
+                    fontSize = 11.sp, color = Color.Gray,
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                StoragePrefs.setMode(context, mode)
+                StoragePrefs.setSubfolder(context, subfolder)
+                StoragePrefs.setTreeUri(context, treeUri)
+                onDismiss()
+            }) { Text("保存") }
+        },
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 // ================= 顶部固定资源监控条 =================
@@ -229,9 +318,11 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
                 Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                val sysCpuText =
+                    if (res.systemCpuPercent < 0) "CPU —" else "CPU ${res.systemCpuPercent.toInt()}%"
                 Text(
-                    "CPU ${res.systemCpuPercent.toInt()}%  Mem $memUsedPct%" +
-                        if (compactRunning) "  压缩 ${res.appCpuPercent.toInt()}%" else "",
+                    "$sysCpuText  App ${res.appCpuPercent.toInt()}%  Mem $memUsedPct%" +
+                        if (compactRunning) "  压缩中" else "",
                     fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                 )
                 Spacer(Modifier.weight(1f))
@@ -245,8 +336,12 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
             AnimatedVisibility(expanded) {
                 Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     HorizontalDivider()
-                    Text("本机 CPU：${"%.1f".format(res.systemCpuPercent)} %", fontSize = 12.sp)
-                    Text("压缩进程 CPU：${"%.1f".format(res.appCpuPercent)} %", fontSize = 12.sp)
+                    Text(
+                        if (res.systemCpuPercent < 0) "本机 CPU：不可用（Android 9+ 系统限制，App 无法读取 /proc/stat）"
+                        else "本机 CPU：${"%.1f".format(res.systemCpuPercent)} %",
+                        fontSize = 12.sp,
+                    )
+                    Text("本 App CPU（含压缩线程）：${"%.1f".format(res.appCpuPercent)} %", fontSize = 12.sp)
                     Text("App 内存：${"%.0f".format(res.appMemMB)} MB", fontSize = 12.sp)
                     Text("系统内存：已用 $memUsedPct%（可用 ${"%.0f".format(res.availMemMB)} / ${"%.0f".format(res.totalMemMB)} MB）", fontSize = 12.sp)
                     Text("磁盘写入：${"%.2f".format(res.ioWriteMBs)} MB/s", fontSize = 12.sp)
@@ -513,11 +608,21 @@ private fun ParamEditDialog(task: TaskEntity, onDismiss: () -> Unit, onSave: (Ta
     )
 }
 
-private fun play(context: android.content.Context, t: TaskEntity) {
-    val path = t.outputPath ?: return
+/** 已完成的视频：媒体库/自定义文件夹用内容 Uri，私有目录用 FileProvider */
+private fun videoUri(context: android.content.Context, t: TaskEntity): Uri? {
+    t.outputUri?.let { return Uri.parse(it) }
+    val path = t.outputPath ?: return null
     val file = File(path)
-    if (!file.exists()) return
-    val uri = FileProvider.getUriForFile(context, "com.ff.compress.fileprovider", file)
+    if (!file.exists()) return null
+    return FileProvider.getUriForFile(context, "com.ff.compress.fileprovider", file)
+}
+
+private fun play(context: android.content.Context, t: TaskEntity) {
+    val uri = videoUri(context, t)
+    if (uri == null) {
+        android.widget.Toast.makeText(context, "文件不存在或已被删除", android.widget.Toast.LENGTH_SHORT).show()
+        return
+    }
     val intent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(uri, "video/mp4")
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -530,10 +635,7 @@ private fun play(context: android.content.Context, t: TaskEntity) {
 }
 
 private fun share(context: android.content.Context, t: TaskEntity) {
-    val path = t.outputPath ?: return
-    val file = File(path)
-    if (!file.exists()) return
-    val uri = FileProvider.getUriForFile(context, "com.ff.compress.fileprovider", file)
+    val uri = videoUri(context, t) ?: return
     val intent = Intent(Intent.ACTION_SEND).apply {
         type = "video/mp4"
         putExtra(Intent.EXTRA_STREAM, uri)

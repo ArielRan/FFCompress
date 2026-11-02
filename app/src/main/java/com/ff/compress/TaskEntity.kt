@@ -46,6 +46,7 @@ data class TaskEntity(
     val status: String = TaskStatus.PENDING,
     val progress: Float = 0f,
     val outputPath: String? = null,
+    val outputUri: String? = null,   // 媒体库 / SAF 模式下的内容 Uri
     val outputSize: Long = 0,
     val error: String? = null,
     val createdAt: Long = System.currentTimeMillis(),

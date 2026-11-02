@@ -6,10 +6,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-/** 实时资源占用快照 */
+/** 实时资源占用快照（systemCpuPercent < 0 表示系统限制读不到） */
 data class ResourceStats(
     val appCpuPercent: Float = 0f,
-    val systemCpuPercent: Float = 0f,
+    val systemCpuPercent: Float = -1f,
     val appMemMB: Float = 0f,
     val availMemMB: Float = 0f,
     val totalMemMB: Float = 0f,

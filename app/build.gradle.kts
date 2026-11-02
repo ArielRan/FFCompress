@@ -61,4 +61,7 @@ dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
+
+    // 自定义输出文件夹（SAF）
+    implementation("androidx.documentfile:documentfile:1.0.1")
 }

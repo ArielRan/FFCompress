@@ -79,8 +79,8 @@ class CompressionService : Service() {
         ResourceMonitor.start(this)
         cancelCurrent = false
 
-        val outDir = getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: filesDir
-        val out = File(outDir, "FFCompress_${System.currentTimeMillis()}.mp4")
+        // 引擎先写临时文件，完成后按全局存储配置落到目标位置
+        val out = File(cacheDir, "enc_${System.currentTimeMillis()}.mp4")
         var lastDb = 0L
         var maxProgress = 0f // 进度只进不退，防止任何引擎回调回跳导致进度条闪烁
 
@@ -109,20 +109,34 @@ class CompressionService : Service() {
 
             val now = System.currentTimeMillis()
             when {
-                cancelCurrent -> dao.update(
-                    t.copy(status = TaskStatus.CANCELLED, progress = 0f, finishedAt = now)
-                )
-                out.exists() && out.length() > 0 -> dao.update(
-                    t.copy(
-                        status = TaskStatus.DONE, progress = 1f,
-                        outputPath = out.absolutePath, outputSize = out.length(), finishedAt = now,
+                cancelCurrent -> {
+                    out.delete()
+                    dao.update(
+                        t.copy(status = TaskStatus.CANCELLED, progress = 0f, finishedAt = now)
                     )
-                )
-                else -> dao.update(
-                    t.copy(status = TaskStatus.FAILED, error = "引擎未产出有效文件", finishedAt = now)
-                )
+                }
+                out.exists() && out.length() > 0 -> {
+                    val size = out.length()
+                    val saved = withContext(Dispatchers.IO) {
+                        OutputStore.save(this@CompressionService, out, OutputStore.buildFileName())
+                    }
+                    dao.update(
+                        t.copy(
+                            status = TaskStatus.DONE, progress = 1f,
+                            outputPath = saved.path, outputUri = saved.uri,
+                            outputSize = size, finishedAt = now,
+                        )
+                    )
+                }
+                else -> {
+                    out.delete()
+                    dao.update(
+                        t.copy(status = TaskStatus.FAILED, error = "引擎未产出有效文件", finishedAt = now)
+                    )
+                }
             }
         } catch (e: Exception) {
+            out.delete()
             dao.update(
                 t.copy(status = TaskStatus.FAILED, error = e.message ?: e.javaClass.simpleName, finishedAt = System.currentTimeMillis())
             )
