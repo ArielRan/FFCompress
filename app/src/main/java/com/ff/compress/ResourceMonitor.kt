@@ -115,15 +115,10 @@ object ResourceMonitor {
             ?.substringAfter(":")?.trim()?.toLongOrNull() ?: 0
     } catch (e: Exception) { 0 }
 
-    private fun readMemory(ctx: Context): Pair<Float, Float> {
-        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        val mb = 1024f * 1024f
-        return if (am != null) {
-            val mi = ActivityManager.MemoryInfo()
-            am.getMemoryInfo(mi)
-            Pair(mi.availMem / mb, mi.totalMem / mb)
-        } else Pair(0f, 0f)
-    }
+    private data class MemInfo(
+        val totalMB: Float, val availMB: Float,
+        val swapTotalMB: Float, val swapAvailMB: Float,
+    )
 
     /**
      * 启动采样（引用计数）
@@ -133,7 +128,45 @@ object ResourceMonitor {
      * 两边都释放后才真正停表。早期版本直接 stop() 会把协程掐掉，
      * 于是 StateFlow 里冻结着最后一帧（例如 App 509%），界面永远显示压缩时的峰值。
      */
-    @Synchronized
+    /**
+     * 直接读 /proc/meminfo（应用域允许）。
+     * 之前用 ActivityManager.MemoryInfo 只反映物理内存，而系统「最近任务」页显示的
+     * 可用内存把 RAM 扩展（RAM Plus / 交换分区）也算了进去，两边数字会对不上。
+     */
+    private fun readMeminfo(ctx: Context): MemInfo {
+        try {
+            val want = setOf("MemTotal", "MemAvailable", "MemFree", "SwapTotal", "SwapFree")
+            val map = HashMap<String, Long>(8)
+            File("/proc/meminfo").useLines { lines ->
+                for (l in lines) {
+                    val i = l.indexOf(':')
+                    if (i <= 0) continue
+                    val key = l.substring(0, i)
+                    if (key in want && key !in map) {
+                        map[key] = l.substring(i + 1).trim().removeSuffix(" kB").toLongOrNull() ?: 0
+                        if (map.size >= want.size) break
+                    }
+                }
+            }
+            val mb = 1024f
+            val total = (map["MemTotal"] ?: 0L) / mb
+            val avail = (map["MemAvailable"] ?: map["MemFree"] ?: 0L) / mb
+            if (total > 0f) {
+                return MemInfo(
+                    totalMB = total, availMB = avail,
+                    swapTotalMB = (map["SwapTotal"] ?: 0L) / mb,
+                    swapAvailMB = (map["SwapFree"] ?: 0L) / mb,
+                )
+            }
+        } catch (e: Exception) { /* 落到 ActivityManager 兜底 */ }
+        // 兜底：拿不到 swap，但至少物理内存数值可用
+        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am?.getMemoryInfo(mi)
+        val mb = 1024f * 1024f
+        return MemInfo(mi.totalMem / mb, mi.availMem / mb, 0f, 0f)
+    }
+
     fun start(ctx: Context) {
         leases++
         lastCtx = ctx.applicationContext
@@ -192,7 +225,7 @@ object ResourceMonitor {
                 val ioMBs = (write - lastWrite) / (1024f * 1024f)
                 lastWrite = write
 
-                val (avail, total) = readMemory(appCtx)
+                val mem = readMeminfo(appCtx)
                 val dm = Debug.MemoryInfo()
                 Debug.getMemoryInfo(dm)
 
@@ -207,8 +240,10 @@ object ResourceMonitor {
                         thermalStatus = thermal,
                         batteryTempC = batteryTemp,
                         appMemMB = dm.totalPss.toFloat() / 1024f,
-                        availMemMB = avail,
-                        totalMemMB = total,
+                        availMemMB = mem.availMB,
+                        totalMemMB = mem.totalMB,
+                        swapAvailMB = mem.swapAvailMB,
+                        swapTotalMB = mem.swapTotalMB,
                         ioWriteMBs = ioMBs.coerceAtLeast(0f),
                     )
                 )
@@ -229,7 +264,7 @@ object ResourceMonitor {
     /** 无任务时的快照：CPU / 磁盘归零，内存与温度仍是真实值 */
     private fun publishIdleSnapshot() {
         val ctx = lastCtx ?: return
-        val (avail, total) = readMemory(ctx)
+        val mem = readMeminfo(ctx)
         val dm = Debug.MemoryInfo()
         Debug.getMemoryInfo(dm)
         CompressionBus.updateResource(
@@ -241,8 +276,10 @@ object ResourceMonitor {
                 thermalStatus = readThermalStatus(ctx),
                 batteryTempC = readBatteryTemp(ctx),
                 appMemMB = dm.totalPss.toFloat() / 1024f,
-                availMemMB = avail,
-                totalMemMB = total,
+                availMemMB = mem.availMB,
+                totalMemMB = mem.totalMB,
+                swapAvailMB = mem.swapAvailMB,
+                swapTotalMB = mem.swapTotalMB,
                 ioWriteMBs = 0f,
             )
         )

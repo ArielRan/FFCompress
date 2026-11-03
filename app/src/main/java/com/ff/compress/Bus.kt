@@ -21,8 +21,12 @@ data class ResourceStats(
     /** 电池温度（℃，-1 = 读不到） */
     val batteryTempC: Float = -1f,
     val appMemMB: Float = 0f,
+    /** 物理内存可用/总量（不含交换分区） */
     val availMemMB: Float = 0f,
     val totalMemMB: Float = 0f,
+    /** 交换分区/RAM 扩展（RAM Plus 等）可用/总量；0 = 无或读不到 */
+    val swapAvailMB: Float = 0f,
+    val swapTotalMB: Float = 0f,
     val ioWriteMBs: Float = 0f,
 )
 

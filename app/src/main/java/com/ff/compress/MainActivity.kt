@@ -332,8 +332,13 @@ private fun StorageSettingsDialog(onDismiss: () -> Unit) {
 @Composable
 private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
     var expanded by rememberSaveable { mutableStateOf(false) }
-    val memUsedPct =
-        if (res.totalMemMB > 0) ((res.totalMemMB - res.availMemMB) / res.totalMemMB * 100).toInt() else 0
+    val memUsedPct = run {
+        // 与系统「最近任务/内存」页同一口径：物理内存 + RAM 扩展（交换分区）都算「可用」，
+        // 否则在开了内存扩展的手机上会显得比系统显示的高得多
+        val totalAll = res.totalMemMB + res.swapTotalMB
+        val availAll = res.availMemMB + res.swapAvailMB
+        if (totalAll > 0) ((totalAll - availAll) / totalAll * 100).toInt().coerceIn(0, 100) else 0
+    }
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
         Column {
             Row(
@@ -382,7 +387,20 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
                         color = thermalColor(res.thermalStatus),
                     )
                     Text("App 内存：${"%.0f".format(res.appMemMB)} MB", fontSize = 12.sp)
-                    Text("系统内存：已用 $memUsedPct%（可用 ${"%.0f".format(res.availMemMB)} / ${"%.0f".format(res.totalMemMB)} MB）", fontSize = 12.sp)
+                    Text(
+                        "系统内存：物理可用 ${fmtGB(res.availMemMB)} / ${fmtGB(res.totalMemMB)} GB",
+                        fontSize = 12.sp,
+                    )
+                    if (res.swapTotalMB > 0f) {
+                        Text(
+                            "内存扩展（RAM Plus/交换）：可用 ${fmtGB(res.swapAvailMB)} / ${fmtGB(res.swapTotalMB)} GB",
+                            fontSize = 12.sp,
+                        )
+                        Text(
+                            "合计可用 ${fmtGB(res.availMemMB + res.swapAvailMB)} GB —— 与系统内存页显示口径一致",
+                            fontSize = 12.sp, color = Color(0xFF1E7B34),
+                        )
+                    }
                     Text("磁盘写入：${"%.2f".format(res.ioWriteMBs)} MB/s", fontSize = 12.sp)
                     if (res.thermalStatus >= 3) {
                         Text(
@@ -429,6 +447,12 @@ private fun thermalColor(status: Int): Color = when {
     status >= 3 -> Color(0xFFB3261E)
     status == 2 -> Color(0xFFB26A00)
     else -> Color.Gray
+}
+
+/** MB → GB 文本：大容量保留 1 位小数，小容量 2 位 */
+private fun fmtGB(mb: Float): String {
+    val gb = mb / 1024f
+    return if (gb >= 10f) "%.1f".format(gb) else "%.2f".format(gb)
 }
 
 // ================= Tab 1：任务列表 =================

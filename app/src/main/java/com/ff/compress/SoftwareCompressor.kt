@@ -86,7 +86,8 @@ class SoftwareCompressor : CompressionEngine {
                     "-bufsize", "${kbps * 2}k",
                 )
             } else {
-                parts += listOf("-c:v", "libx264", "-preset", opts.preset, "-crf", "23")
+                // CRF 21（x264 默认 23 偏「省空间」；21 在 1080P 下大多数场景肉眼不可辨）
+                parts += listOf("-c:v", "libx264", "-preset", opts.preset, "-crf", "21")
                 // CRF 对已高度压缩的源会「越压越大」，这里钉一个上限兜底
                 if (capKbps > 0) parts += listOf("-maxrate", "${capKbps}k", "-bufsize", "${capKbps * 2}k")
             }
