@@ -30,3 +30,6 @@ Thumbs.db
 release.keystore
 key.properties
 dist/
+
+# 本机开发说明（不入库）
+EMULATOR_DEBUG_GUIDE.md
