@@ -36,13 +36,14 @@ android {
         }
     }
 
-    // 按 ABI 拆分：手机直接装对应架构的小包（arm64 约 25MB），同时保留通用包
+    // 按 ABI 拆分。默认只出 arm64-v8a（真机包，约 43MB）；
+    // 模拟器调试时加 -Pemu 出 x86_64 包：gradle :app:assembleDebug -Pemu
     splits {
         abi {
             isEnable = true
             reset()
-            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-            isUniversalApk = true
+            if (project.hasProperty("emu")) include("x86_64") else include("arm64-v8a")
+            isUniversalApk = false
         }
     }
 

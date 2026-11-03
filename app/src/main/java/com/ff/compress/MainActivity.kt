@@ -333,10 +333,11 @@ private fun StorageSettingsDialog(onDismiss: () -> Unit) {
 private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val memUsedPct = run {
-        // 与系统「最近任务/内存」页同一口径：物理内存 + RAM 扩展（交换分区）都算「可用」，
-        // 否则在开了内存扩展的手机上会显得比系统显示的高得多
+        // 与系统内存页同一口径（实测 OneUI）：可用 = 物理可用 + 内存扩展总容量。
+        // 系统把 RAM Plus 整块都算作可用（不管已换出多少），例如 12G+12G 手机：
+        // 物理可用 2.8 + 内存扩展 12.0 = 14.8 GB —— 若按「扩展剩余」算会只有 9.7 GB，显得虚高
         val totalAll = res.totalMemMB + res.swapTotalMB
-        val availAll = res.availMemMB + res.swapAvailMB
+        val availAll = res.availMemMB + res.swapTotalMB
         if (totalAll > 0) ((totalAll - availAll) / totalAll * 100).toInt().coerceIn(0, 100) else 0
     }
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
@@ -393,12 +394,16 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
                     )
                     if (res.swapTotalMB > 0f) {
                         Text(
-                            "内存扩展（RAM Plus/交换）：可用 ${fmtGB(res.swapAvailMB)} / ${fmtGB(res.swapTotalMB)} GB",
+                            "内存扩展（RAM Plus/交换）：已用 ${fmtGB(res.swapTotalMB - res.swapAvailMB)} / ${fmtGB(res.swapTotalMB)} GB",
                             fontSize = 12.sp,
                         )
                         Text(
-                            "合计可用 ${fmtGB(res.availMemMB + res.swapAvailMB)} GB —— 与系统内存页显示口径一致",
+                            "合计可用 ${fmtGB(res.availMemMB + res.swapTotalMB)} GB —— 与系统内存页显示口径一致",
                             fontSize = 12.sp, color = Color(0xFF1E7B34),
+                        )
+                        Text(
+                            "（系统把内存扩展整块都算作可用；实际已有 ${fmtGB(res.swapTotalMB - res.swapAvailMB)} GB 数据换出其中）",
+                            fontSize = 11.sp, color = Color.Gray,
                         )
                     }
                     Text("磁盘写入：${"%.2f".format(res.ioWriteMBs)} MB/s", fontSize = 12.sp)
