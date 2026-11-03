@@ -2,6 +2,20 @@
 
 安卓原生视频压缩工具，双压缩引擎 + 实时资源监控，让你完全掌控压缩任务的 CPU/内存占用。
 
+<p align="center"><img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" width="96" alt="FFCompress 图标"/></p>
+
+## 下载安装
+
+直接从 [Releases](https://github.com/ArielRan/FFCompress/releases/latest) 下载 APK 安装：
+
+| 包 | 适用 |
+|---|---|
+| `FFCompress-v*-arm64-v8a.apk` | 2016 年后绝大多数手机（推荐） |
+| `FFCompress-v*-armeabi-v7a.apk` | 老款 32 位手机 |
+| `FFCompress-v*-universal.apk` | 不确定架构时 |
+
+无需任何账号，全部压缩在本机完成，App 无网络权限。
+
 ## 功能
 
 - **双压缩引擎**
