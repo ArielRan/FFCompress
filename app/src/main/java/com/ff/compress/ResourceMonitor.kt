@@ -30,6 +30,9 @@ import java.io.File
 object ResourceMonitor {
     private const val CLOCK_TICKS = 100L // getconf CLK_TCK 通常为 100
     private var job: Job? = null
+    /** 租约计数：UI 与 Service 各持一份，归零才真正停表 */
+    private var leases = 0
+    private var lastCtx: Context? = null
 
     /** 设备可用核心数（已考虑 cpuset 限制，比 /proc/cpuinfo 更贴近实际可调度核数） */
     private val cores: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
@@ -122,8 +125,19 @@ object ResourceMonitor {
         } else Pair(0f, 0f)
     }
 
+    /**
+     * 启动采样（引用计数）
+     *
+     * UI 和后台 Service 都会各自持有一个租约：Service 压缩结束时释放它那一份，
+     * 只要界面还开着，采样就继续跑，数值能自然回落到 0；
+     * 两边都释放后才真正停表。早期版本直接 stop() 会把协程掐掉，
+     * 于是 StateFlow 里冻结着最后一帧（例如 App 509%），界面永远显示压缩时的峰值。
+     */
+    @Synchronized
     fun start(ctx: Context) {
-        stop()
+        leases++
+        lastCtx = ctx.applicationContext
+        if (job?.isActive == true) return
         val appCtx = ctx.applicationContext
         var lastSelfTicks = readSelfCpuTicks()
         var lastSysStat = readProcStat()
@@ -202,8 +216,35 @@ object ResourceMonitor {
         }
     }
 
+    /** 释放一份租约；归零时停表，并把占用类指标归零（保留内存/温度等静态信息） */
+    @Synchronized
     fun stop() {
+        if (leases > 0) leases--
+        if (leases > 0) return
         job?.cancel()
         job = null
+        publishIdleSnapshot()
+    }
+
+    /** 无任务时的快照：CPU / 磁盘归零，内存与温度仍是真实值 */
+    private fun publishIdleSnapshot() {
+        val ctx = lastCtx ?: return
+        val (avail, total) = readMemory(ctx)
+        val dm = Debug.MemoryInfo()
+        Debug.getMemoryInfo(dm)
+        CompressionBus.updateResource(
+            ResourceStats(
+                appCpuPercent = 0f,
+                systemCpuPercent = -1f,
+                cores = cores,
+                capacityPercent = 0f,
+                thermalStatus = readThermalStatus(ctx),
+                batteryTempC = readBatteryTemp(ctx),
+                appMemMB = dm.totalPss.toFloat() / 1024f,
+                availMemMB = avail,
+                totalMemMB = total,
+                ioWriteMBs = 0f,
+            )
+        )
     }
 }

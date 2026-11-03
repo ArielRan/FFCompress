@@ -111,12 +111,12 @@ fun MainScreen() {
     val totalSaved = doneList.sumOf { it.sourceSize - it.outputSize }
     val isRunning = runtime != null && runningTask != null
 
-    // ---- 资源监控：软件在前台期间持续采样（不只在压缩时） ----
+    // ---- 资源监控：界面在前台期间持续采样（与后台 Service 各自持有一份租约） ----
     DisposableEffect(Unit) {
         ResourceMonitor.start(context)
         onDispose {
-            // 若后台压缩服务仍在跑，保留监控；否则停止采样省电
-            if (TaskRuntime.current.value == null) ResourceMonitor.stop()
+            // 只释放自己这一份；若后台压缩服务仍在跑，它那份租约会让采样继续
+            ResourceMonitor.stop()
         }
     }
 
@@ -342,13 +342,15 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
             ) {
                 Text(
                     "App ${res.appCpuPercent.toInt()}%  整机 ${res.capacityPercent.toInt()}%  " +
-                        "Mem $memUsedPct%  热${thermalLabel(res.thermalStatus)}" +
-                        if (compactRunning) "  压缩中" else "",
+                        "Mem $memUsedPct%" + if (compactRunning) " 压缩中" else "",
                     fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    color = if (res.thermalStatus >= 3) thermalColor(res.thermalStatus) else Color.Unspecified,
                 )
                 Spacer(Modifier.weight(1f))
-                Text("磁盘 ${"%.1f".format(res.ioWriteMBs)} MB/s", fontSize = 11.sp, color = Color.Gray)
+                Text(
+                    "热${thermalLabel(res.thermalStatus)}" +
+                        if (res.batteryTempC >= 0f) " ${"%.1f".format(res.batteryTempC)}℃" else "",
+                    fontSize = 12.sp, color = thermalColor(res.thermalStatus),
+                )
                 Icon(
                     if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
                     contentDescription = null, tint = Color.Gray,
