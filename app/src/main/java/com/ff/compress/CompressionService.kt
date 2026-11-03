@@ -132,7 +132,7 @@ class CompressionService : Service() {
                         )
                     } else {
                         val saved = withContext(Dispatchers.IO) {
-                            OutputStore.save(this@CompressionService, out, OutputStore.buildFileName())
+                            OutputStore.save(this@CompressionService, out, OutputStore.buildFileName(t.displayName))
                         }
                         dao.update(
                             t.copy(

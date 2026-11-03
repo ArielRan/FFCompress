@@ -62,8 +62,23 @@ object StoragePrefs {
 object OutputStore {
     data class Saved(val path: String?, val uri: String?)
 
-    fun buildFileName(): String =
-        "FFCompress_${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())}.mp4"
+    /**
+     * 输出文件名：原文件名_compressed_时间戳.mp4
+     * 例如 test.mp4 → test_compressed_20261103_093000.mp4
+     * - 去掉原扩展名、清洗非法字符、超长截断，避免不同系统兼容问题
+     * - 带时间戳保证同秒多次压缩不冲突（媒体库/SAF 对重名会自动追加 (1)，私有目录则直接落盘）
+     */
+    fun buildFileName(sourceDisplayName: String): String {
+        val base = sourceDisplayName
+            .substringBeforeLast('.')
+            .replace(Regex("[\\\\/:*?\"<>|\\x00]"), "_")
+            .trim()
+            .take(50)
+            .ifBlank { "video" }
+        val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+            .format(java.util.Date())
+        return "${base}_compressed_$ts.mp4"
+    }
 
     /**
      * @param temp 引擎写出的临时文件

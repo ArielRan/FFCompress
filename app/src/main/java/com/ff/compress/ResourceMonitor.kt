@@ -40,7 +40,15 @@ object ResourceMonitor {
         return Pair(idle, vals.sum())
     }
 
-    /** `top -b -n 2 -d 1` 采样全机 CPU%（两次快照差值，约 1 秒） */
+    /**
+     * `top -b -n 2 -d 1` 采样全机 CPU%（两次快照差值，约 1 秒）
+     *
+     * ⚠️ 关键坑：App 启动的 top 继承 untrusted_app SELinux 域，同样读不到 /proc/stat。
+     * 此时 toybox top 不报错，而是输出一条退化的假汇总行：
+     *     400%cpu  0%user  0%nice  0%sys  400%idle ...
+     * （total 和 idle 恒相等、user/sys 恒为 0）——解析它会得到永远 0% 的"假成功"。
+     * 这里通过 user/sys 全 0 且 idle≈total 识别假数据，返回 null 让 UI 显示"—"。
+     */
     private fun readSystemCpuViaTop(): Float? {
         return try {
             val proc = ProcessBuilder("/system/bin/top", "-b", "-n", "2", "-d", "1")
@@ -52,7 +60,12 @@ object ResourceMonitor {
             val line = text.lineSequence().lastOrNull { it.contains("%cpu") } ?: return null
             val total = Regex("([\\d.]+)%cpu").find(line)?.groupValues?.get(1)?.toFloatOrNull() ?: return null
             val idle = Regex("([\\d.]+)%idle").find(line)?.groupValues?.get(1)?.toFloatOrNull() ?: return null
-            if (total <= 0f) null else ((total - idle) * 100f / total).coerceIn(0f, 100f)
+            val user = Regex("([\\d.]+)%user").find(line)?.groupValues?.get(1)?.toFloatOrNull() ?: 0f
+            val sys = Regex("([\\d.]+)%sys(?!i)").find(line)?.groupValues?.get(1)?.toFloatOrNull() ?: 0f
+            if (total <= 0f) return null
+            // user/sys 全 0 且接近满 idle：top 自己也读不到 /proc/stat，输出的是假数据
+            if (user <= 0f && sys <= 0f && idle >= total * 0.999f) return null
+            ((total - idle) * 100f / total).coerceIn(0f, 100f)
         } catch (e: Exception) {
             null
         }

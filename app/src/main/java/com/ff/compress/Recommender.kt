@@ -56,6 +56,14 @@ object Recommender {
         return minOf(a, b)
     }
 
+    /**
+     * 默认编码线程数：核心数的一半，夹在 2~6 之间。
+     * 设计意图：压缩任务不能把手机跑满——留一半核心给系统和前台应用，
+     * 8 核手机默认 4 线程、4 核设备默认 2 线程，用户仍可在参数里手动调 1~8。
+     */
+    private fun defaultThreads(): Int =
+        ((Runtime.getRuntime().availableProcessors() + 1) / 2).coerceIn(2, 6)
+
     fun recommend(meta: MetadataReader.VideoMeta): Recommendation {
         val srcVideoBps = meta.effectiveVideoBitrateBps
         val srcVideoMbps = srcVideoBps / 1_000_000.0
@@ -91,7 +99,7 @@ object Recommender {
                 engine = Engine.SOFTWARE,
                 targetHeight = 0,
                 targetBitrateMbps = 0f,
-                threadLimit = 4,
+                threadLimit = defaultThreads(),
                 preset = "medium",
                 explanation = "$sizeInfo。\n" +
                     "⚠️ 该视频已经压得很狠了：${effHeight}P 画质再压到低于约 " +
@@ -110,7 +118,7 @@ object Recommender {
                 engine = Engine.SOFTWARE,
                 targetHeight = targetHeight,
                 targetBitrateMbps = 0f,
-                threadLimit = 4,
+                threadLimit = defaultThreads(),
                 preset = "medium",
                 explanation = "$sizeInfo。\n" +
                     "码率远超 ${effHeight}P 画质所需（CRF23 典型约 ${"%.1f".format(crfMbps)} Mbps）" +
@@ -129,7 +137,7 @@ object Recommender {
             engine = Engine.SOFTWARE,
             targetHeight = targetHeight,
             targetBitrateMbps = target.toFloat(),
-            threadLimit = 4,
+            threadLimit = defaultThreads(),
             preset = "medium",
             explanation = "$sizeInfo。\n" +
                 "码率略高于 ${effHeight}P 的画质下限（约 ${"%.2f".format(floorMbps)} Mbps），" +
