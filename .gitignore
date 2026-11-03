@@ -29,3 +29,4 @@ Thumbs.db
 # 签名材料不入库
 release.keystore
 key.properties
+dist/
