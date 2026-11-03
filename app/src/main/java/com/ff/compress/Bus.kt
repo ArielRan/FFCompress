@@ -8,8 +8,18 @@ import kotlinx.coroutines.flow.StateFlow
 
 /** 实时资源占用快照（systemCpuPercent < 0 表示系统限制读不到） */
 data class ResourceStats(
+    /** 本进程 CPU，单位「核心百分比」：100% = 占满 1 个核，多线程可超过 100% */
     val appCpuPercent: Float = 0f,
+    /** 全机 CPU%（0~100）；< 0 表示受 SELinux 限制读不到 */
     val systemCpuPercent: Float = -1f,
+    /** 设备可用 CPU 核心数（Runtime.availableProcessors，已考虑 cpuset 限制） */
+    val cores: Int = 1,
+    /** 本 App 占用整机算力的比例（0~100）= appCpuPercent / cores */
+    val capacityPercent: Float = 0f,
+    /** 系统热状态（PowerManager.THERMAL_STATUS_*）；-1 = 该设备/系统不支持 */
+    val thermalStatus: Int = -1,
+    /** 电池温度（℃，-1 = 读不到） */
+    val batteryTempC: Float = -1f,
     val appMemMB: Float = 0f,
     val availMemMB: Float = 0f,
     val totalMemMB: Float = 0f,

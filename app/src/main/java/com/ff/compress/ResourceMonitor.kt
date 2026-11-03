@@ -2,7 +2,13 @@ package com.ff.compress
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
+import android.os.Build
 import android.os.Debug
+import android.os.PowerManager
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -16,12 +22,17 @@ import java.io.File
  * - 本进程 CPU%：/proc/self/stat 的 utime+stime 增量（始终可用，含 FFmpeg 线程）
  * - 全机 CPU%：Android 9+ SELinux 禁止 App 读 /proc/stat，
  *   故先试 /proc/stat，失败则用 `top -b -n 2` 采样，都失败则标记不可用（-1）
+ * - 整机算力占比：appCpu% / 核心数（appCpu 以「单核 100%」计，此值 = 本 App 吃掉整机多少算力）
+ * - 热状态：PowerManager.getCurrentThermalStatus（Android 10+ 官方 Thermal API，无需权限）
  * - 内存：Debug.getMemoryInfo(PSS) + ActivityManager
  * - IO：/proc/self/io write_bytes 增量
  */
 object ResourceMonitor {
     private const val CLOCK_TICKS = 100L // getconf CLK_TCK 通常为 100
     private var job: Job? = null
+
+    /** 设备可用核心数（已考虑 cpuset 限制，比 /proc/cpuinfo 更贴近实际可调度核数） */
+    private val cores: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
 
     private fun readSelfCpuTicks(): Long {
         val stat = try { File("/proc/self/stat").readText() } catch (e: Exception) { return 0 }
@@ -30,6 +41,30 @@ object ResourceMonitor {
         val stime = parts.getOrNull(12)?.toLongOrNull() ?: 0
         return utime + stime
     }
+
+    /**
+     * 系统热状态（Android 10+ Thermal API）
+     * 0 NONE / 1 LIGHT / 2 MODERATE / 3 SEVERE / 4 CRITICAL / 5 EMERGENCY / 6 SHUTDOWN
+     */
+    private fun readThermalStatus(ctx: Context): Int = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            (ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.currentThermalStatus ?: -1
+        } else -1
+    } catch (e: Exception) {
+        -1
+    }
+
+    /** 电池温度（℃）：读 ACTION_BATTERY_CHANGED 的粘性广播，无需权限；注意是 0.1℃ 单位 */
+    private fun readBatteryTemp(ctx: Context): Float = try {
+        val i = ContextCompat.registerReceiver(
+            ctx, null, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        val raw = i?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+        if (raw == Int.MIN_VALUE) -1f else raw / 10f
+    } catch (e: Exception) {
+        -1f
+    }
+
 
     /** /proc/stat 增量（旧系统可用；Android 9+ 多半被拒） */
     private fun readProcStat(): Pair<Long, Long>? {
@@ -98,6 +133,8 @@ object ResourceMonitor {
             var systemCpu = -1f          // -1 = 暂不可用
             var systemCpuUsable = true   // 连续失败 3 次后停用，每 30 秒重试一次
             var sysFail = 0
+            var thermal = -1
+            var batteryTemp = -1f
             while (isActive) {
                 delay(1000)
                 tick++
@@ -105,6 +142,12 @@ object ResourceMonitor {
                 val ticks = readSelfCpuTicks()
                 val appCpu = (ticks - lastSelfTicks) * 100f / CLOCK_TICKS
                 lastSelfTicks = ticks
+
+                // 热状态 / 电池温度每 2 秒读一次（粘性广播开销可忽略，但没必要每秒发）
+                if (tick % 2 == 0) {
+                    thermal = readThermalStatus(appCtx)
+                    batteryTemp = readBatteryTemp(appCtx)
+                }
 
                 // 系统 CPU 每 2 秒采样一次（top 采样本身约耗时 1 秒）
                 val shouldProbe = systemCpuUsable || tick % 30 == 0
@@ -139,10 +182,16 @@ object ResourceMonitor {
                 val dm = Debug.MemoryInfo()
                 Debug.getMemoryInfo(dm)
 
+                val appCpuSafe = appCpu.coerceAtLeast(0f)
                 CompressionBus.updateResource(
                     ResourceStats(
-                        appCpuPercent = appCpu.coerceAtLeast(0f),
+                        appCpuPercent = appCpuSafe,
                         systemCpuPercent = systemCpu,
+                        cores = cores,
+                        // appCpu 是「单核 100%」口径，除以核数即占整机总算力的比例
+                        capacityPercent = (appCpuSafe / cores).coerceIn(0f, 100f),
+                        thermalStatus = thermal,
+                        batteryTempC = batteryTemp,
                         appMemMB = dm.totalPss.toFloat() / 1024f,
                         availMemMB = avail,
                         totalMemMB = total,

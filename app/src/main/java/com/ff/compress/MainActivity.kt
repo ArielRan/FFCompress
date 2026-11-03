@@ -340,12 +340,12 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
                 Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                val sysCpuText =
-                    if (res.systemCpuPercent < 0) "CPU —" else "CPU ${res.systemCpuPercent.toInt()}%"
                 Text(
-                    "$sysCpuText  App ${res.appCpuPercent.toInt()}%  Mem $memUsedPct%" +
+                    "App ${res.appCpuPercent.toInt()}%  整机 ${res.capacityPercent.toInt()}%  " +
+                        "Mem $memUsedPct%  热${thermalLabel(res.thermalStatus)}" +
                         if (compactRunning) "  压缩中" else "",
                     fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    color = if (res.thermalStatus >= 3) thermalColor(res.thermalStatus) else Color.Unspecified,
                 )
                 Spacer(Modifier.weight(1f))
                 Text("磁盘 ${"%.1f".format(res.ioWriteMBs)} MB/s", fontSize = 11.sp, color = Color.Gray)
@@ -359,18 +359,74 @@ private fun ResourceBar(res: ResourceStats, compactRunning: Boolean) {
                 Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     HorizontalDivider()
                     Text(
-                        if (res.systemCpuPercent < 0) "本机 CPU：不可用（Android 9+ 系统限制，App 无法读取 /proc/stat）"
-                        else "本机 CPU：${"%.1f".format(res.systemCpuPercent)} %",
+                        if (res.systemCpuPercent < 0) "全机 CPU：不可用（Android 9+ SELinux 禁止 App 读 /proc/stat）"
+                        else "全机 CPU：${"%.1f".format(res.systemCpuPercent)} %",
                         fontSize = 12.sp,
                     )
-                    Text("本 App CPU（含压缩线程）：${"%.1f".format(res.appCpuPercent)} %", fontSize = 12.sp)
+                    Text(
+                        "占整机算力：${"%.1f".format(res.capacityPercent)} %" +
+                            "（App ${"%.0f".format(res.appCpuPercent)}% ÷ ${res.cores} 核）",
+                        fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        "本 App CPU：${"%.1f".format(res.appCpuPercent)} %（100% = 占满 1 个核，含压缩线程）",
+                        fontSize = 12.sp,
+                    )
+                    Text("设备可用核心：${res.cores}", fontSize = 12.sp)
+                    Text(
+                        "机身热状态：${thermalLabel(res.thermalStatus)}" + thermalDetail(res.thermalStatus) +
+                            if (res.batteryTempC >= 0f) "　电池 ${"%.1f".format(res.batteryTempC)} ℃" else "",
+                        fontSize = 12.sp,
+                        color = thermalColor(res.thermalStatus),
+                    )
                     Text("App 内存：${"%.0f".format(res.appMemMB)} MB", fontSize = 12.sp)
                     Text("系统内存：已用 $memUsedPct%（可用 ${"%.0f".format(res.availMemMB)} / ${"%.0f".format(res.totalMemMB)} MB）", fontSize = 12.sp)
                     Text("磁盘写入：${"%.2f".format(res.ioWriteMBs)} MB/s", fontSize = 12.sp)
+                    if (res.thermalStatus >= 3) {
+                        Text(
+                            "⚠ 机身已过热，系统正在降频，压缩速度会明显下降且长时间高温伤电池。" +
+                                "建议把线程数降到 2~3，或暂停任务等温度回落。",
+                            fontSize = 12.sp, color = thermalColor(res.thermalStatus),
+                        )
+                    }
+                    Text(
+                        "说明：CPU 占用高不等于整机负载高——短时占满若散热跟得上并不影响使用；" +
+                            "真正决定是否降频的是上面的热状态。",
+                        fontSize = 11.sp, color = Color.Gray,
+                    )
                 }
             }
         }
     }
+}
+
+/** Thermal API 状态 → 简短中文（0=无 1=轻 2=中 3=严重 4=危急 5=紧急 6=关机） */
+private fun thermalLabel(status: Int): String = when (status) {
+    0 -> "正常"
+    1 -> "轻热"
+    2 -> "中热"
+    3 -> "过热"
+    4 -> "危急"
+    5 -> "紧急"
+    6 -> "关机"
+    else -> "—"
+}
+
+private fun thermalDetail(status: Int): String = when (status) {
+    0 -> "（NONE，散热余量充足）"
+    1 -> "（LIGHT，轻微升温）"
+    2 -> "（MODERATE，开始限制性能）"
+    3 -> "（SEVERE，已明显降频）"
+    4 -> "（CRITICAL，严重降频）"
+    5 -> "（EMERGENCY，接近关机阈值）"
+    6 -> "（SHUTDOWN）"
+    else -> "（该设备不支持 Thermal API）"
+}
+
+private fun thermalColor(status: Int): Color = when {
+    status >= 3 -> Color(0xFFB3261E)
+    status == 2 -> Color(0xFFB26A00)
+    else -> Color.Gray
 }
 
 // ================= Tab 1：任务列表 =================
