@@ -1,7 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
+}
+
+// 签名信息放在仓库外的 key.properties（已被 .gitignore 排除）；
+// 不存在时退回 debug 签名，保证任何人 clone 后 assembleRelease 也能直接出包
+val keystorePropsFile = rootProject.file("key.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
 
 android {
@@ -12,13 +21,42 @@ android {
         applicationId = "com.ff.compress"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "1.0.0"
+    }
+
+    signingConfigs {
+        if (keystorePropsFile.exists()) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
+    // 按 ABI 拆分：手机直接装对应架构的小包（arm64 约 25MB），同时保留通用包
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true
+        }
+    }
+
+    lint {
+        // 离线环境拉不到 lint-gradle；发布前人工验证，不在构建里跑 vital lint
+        checkReleaseBuilds = false
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (keystorePropsFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {

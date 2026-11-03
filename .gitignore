@@ -25,3 +25,7 @@ Thumbs.db
 
 # WorkBuddy 工作数据
 .workbuddy/
+
+# 签名材料不入库
+release.keystore
+key.properties
